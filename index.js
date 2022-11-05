@@ -1,186 +1,150 @@
 import 'dotenv/config';
 import express from 'express';
-import {
-    InteractionType,
-    InteractionResponseType,
-    InteractionResponseFlags,
-    MessageComponentTypes,
-    ButtonStyleTypes,
-} from 'discord-interactions';
-import { VerifyDiscordRequest, getRandomEmoji, DiscordRequest } from './utils.js';
-import { getShuffledOptions, getResult } from './game.js';
-import {
-    CHALLENGE_COMMAND,
-    TEST_COMMAND,
-    HasGuildCommands,
-} from './commands.js';
+import cron from 'node-cron';
+import { joinVoiceChannel, entersState, VoiceConnectionStatus, generateDependencyReport, AudioPlayerStatus, NoSubscriberBehavior, createAudioResource, createAudioPlayer } from '@discordjs/voice';
+import { Client, GatewayIntentBits, REST, Routes } from 'discord.js';
+import fs from 'fs';
+import { Readable } from 'node:stream';
+import { join } from 'node:path';
 
-// Create an express app
-const app = express();
-// Get port, or default to 3000
-const PORT = process.env.PORT || 3000;
-// Parse request body and verifies incoming requests using discord-interactions package
-app.use(express.json({ verify: VerifyDiscordRequest(process.env.PUBLIC_KEY) }));
+const { Pause } = NoSubscriberBehavior;
+const { Idle } = AudioPlayerStatus;
+console.log(generateDependencyReport());
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
-// Store for in-progress games. In production, you'd want to use a DB
-// const activeGames = {};
 
-/**
- * Interactions endpoint URL where Discord will send HTTP requests
- */
-app.post('/interactions', async function (req, res) {
-    // Interaction type and data
-    const { type, id, data } = req.body;
 
-    // /**
-    //  * Handle verification requests
-    //  */
-    // if (type === InteractionType.PING) {
-    //     return res.send({ type: InteractionResponseType.PONG });
-    // }
 
-    // /**
-    //  * Handle slash command requests
-    //  * See https://discord.com/developers/docs/interactions/application-commands#slash-commands
-    //  */
-    // if (type === InteractionType.APPLICATION_COMMAND) {
-    //     const { name } = data;
+//initializing bot
+const commands = [
+    {
+        name: 'ping',
+        description: 'Replies with Pong!',
+    },
+];
 
-    //     // "test" guild command
-    //     if (name === 'test') {
-    //         // Send a message into the channel where command was triggered from
-    //         return res.send({
-    //             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    //             data: {
-    //                 // Fetches a random emoji to send from a helper function
-    //                 content: 'hello world ' + getRandomEmoji(),
-    //             },
-    //         });
-    //     }
-    //     // "challenge" guild command
-    //     if (name === 'challenge' && id) {
-    //         const userId = req.body.member.user.id;
-    //         // User's object choice
-    //         const objectName = req.body.data.options[0].value;
+const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
-    //         // Create active game using message ID as the game ID
-    //         activeGames[id] = {
-    //             id: userId,
-    //             objectName,
-    //         };
+(async () => {
+    try {
+        console.log('Started refreshing application (/) commands.');
 
-    //         return res.send({
-    //             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    //             data: {
-    //                 // Fetches a random emoji to send from a helper function
-    //                 content: `Rock papers scissors challenge from <@${userId}>`,
-    //                 components: [
-    //                     {
-    //                         type: MessageComponentTypes.ACTION_ROW,
-    //                         components: [
-    //                             {
-    //                                 type: MessageComponentTypes.BUTTON,
-    //                                 // Append the game ID to use later on
-    //                                 custom_id: `accept_button_${req.body.id}`,
-    //                                 label: 'Accept',
-    //                                 style: ButtonStyleTypes.PRIMARY,
-    //                             },
-    //                         ],
-    //                     },
-    //                 ],
-    //             },
-    //         });
-    //     }
-    // }
+        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
 
-    // /**
-    //  * Handle requests from interactive components
-    //  * See https://discord.com/developers/docs/interactions/message-components#responding-to-a-component-interaction
-    //  */
-    // if (type === InteractionType.MESSAGE_COMPONENT) {
-    //     // custom_id set in payload when sending message component
-    //     const componentId = data.custom_id;
+        console.log('Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error(error);
+    }
+})();
 
-    //     if (componentId.startsWith('accept_button_')) {
-    //         // get the associated game ID
-    //         const gameId = componentId.replace('accept_button_', '');
-    //         // Delete message with token in request body
-    //         const endpoint = `webhooks/${process.env.APP_ID}/${req.body.token}/messages/${req.body.message.id}`;
-    //         try {
-    //             await res.send({
-    //                 type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    //                 data: {
-    //                     // Fetches a random emoji to send from a helper function
-    //                     content: 'What is your object of choice?',
-    //                     // Indicates it'll be an ephemeral message
-    //                     flags: InteractionResponseFlags.EPHEMERAL,
-    //                     components: [
-    //                         {
-    //                             type: MessageComponentTypes.ACTION_ROW,
-    //                             components: [
-    //                                 {
-    //                                     type: MessageComponentTypes.STRING_SELECT,
-    //                                     // Append game ID
-    //                                     custom_id: `select_choice_${gameId}`,
-    //                                     options: getShuffledOptions(),
-    //                                 },
-    //                             ],
-    //                         },
-    //                     ],
-    //                 },
-    //             });
-    //             // Delete previous message
-    //             await DiscordRequest(endpoint, { method: 'DELETE' });
-    //         } catch (err) {
-    //             console.error('Error sending message:', err);
-    //         }
-    //     } else if (componentId.startsWith('select_choice_')) {
-    //         // get the associated game ID
-    //         const gameId = componentId.replace('select_choice_', '');
+async function connectToChannel(channel) {
+    const connection = joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator: channel.guild.voiceAdapterCreator,
+    });
 
-    //         if (activeGames[gameId]) {
-    //             // Get user ID and object choice for responding user
-    //             const userId = req.body.member.user.id;
-    //             const objectName = data.values[0];
-    //             // Calculate result from helper function
-    //             const resultStr = getResult(activeGames[gameId], {
-    //                 id: userId,
-    //                 objectName,
-    //             });
+    try {
+        await entersState(connection, VoiceConnectionStatus.Ready, 30e3);
+        return connection;
+    } catch (error) {
+        console.log(error);
+        connection.destroy();
+        throw error;
+    }
+}
 
-    //             // Remove game from storage
-    //             delete activeGames[gameId];
-    //             // Update message with token in request body
-    //             const endpoint = `webhooks/${process.env.APP_ID}/${req.body.token}/messages/${req.body.message.id}`;
+client.on('ready', async () => {
+    console.log('the client is ready');
+    console.log(`Logged in as ${client.user.tag}!`);
 
-    //             try {
-    //                 // Send results
-    //                 await res.send({
-    //                     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-    //                     data: { content: resultStr },
-    //                 });
-    //                 // Update ephemeral message
-    //                 await DiscordRequest(endpoint, {
-    //                     method: 'PATCH',
-    //                     body: {
-    //                         content: 'Nice choice ' + getRandomEmoji(),
-    //                         components: [],
-    //                     },
-    //                 });
-    //             } catch (err) {
-    //                 console.error('Error sending message:', err);
-    //             }
-    //         }
-    //     }
-    // }
+    client.user.setActivity('Invite me on top.gg', {
+        type: 'PLAYING',
+        url: ""
+    });
+    await cron.schedule("*/15 * * * * *", async function () {
+        try {
+
+            console.log("---------------------");
+            console.log("running a task every 15 seconds");
+            const channel = await client.channels.fetch('890286827272028204');
+
+            const connection = await connectToChannel(channel);
+            const buffer = fs.readFileSync(join('./assets/audio', 'Trabalho Geografia Arthur Cunha 12-08-2020.mp3'));
+            const readable = Readable.from(buffer);
+
+            if (!buffer) {
+                console.log("No buffer.");
+            }
+
+            if (!readable) {
+                console.log("no readable");
+            }
+
+            const resource = createAudioResource(readable, {
+                inlineVolume: true
+            });
+            console.log(resource);
+            if (!resource) {
+                console.log("no resource");
+            }
+            resource.volume.setVolume(1);
+
+            const player = createAudioPlayer({
+                behaviors: { noSubscriber: Pause }
+            });
+
+            connection.subscribe(player);
+
+            player.play(resource);
+
+            player.on('error', async () => {
+                console.log("error");
+                player.stop();
+                connection.destroy();
+            });
+
+            player.on(Idle, () => {
+                console.log("idle");
+                player.stop();
+                connection.destroy();
+            });
+
+
+            // connection.on(VoiceConnectionStatus.Ready, () => {
+            //     console.log('The connection has entered the Ready state - ready to play audio!');
+            //     setTimeout(() => { console.log("Sair do Canal"); }, 5_000);
+            // });
+            // Subscribe the connection to the audio player (will play audio on the voice connection)
+            // const subscription = connection.subscribe(audioPlayer);
+
+            // // subscription could be undefined if the connection is destroyed!
+            // if (subscription) {
+            //     // Unsubscribe after 5 seconds (stop playing audio on the voice connection)
+            //     setTimeout(() => subscription.unsubscribe(), 5_000);
+            // }
+
+
+            // const channel = await client.channels.fetch(process.env.DISCORD_CHANNEL);
+            // await channel.send('uwu')
+
+        } catch (error) {
+            console.log(error);
+        }
+    });
 });
 
-app.listen(PORT, () => {
-    console.log('Listening on port', PORT);
 
-    // Check if guild commands from commands.js are installed (if not, install them)
-    HasGuildCommands(process.env.APP_ID, process.env.GUILD_ID, [
-        TEST_COMMAND,
-        CHALLENGE_COMMAND,
-    ]);
+client.on(' ', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'ping') {
+        console.log(interaction.channel);
+        await interaction.reply('Pong!');
+    }
 });
+
+client.login(process.env.DISCORD_TOKEN);
+
+
+
